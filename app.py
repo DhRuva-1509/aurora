@@ -5,6 +5,5 @@ if __name__ == "__main__":
     audio = record_audio()
     result = transcribe_audio(audio)
     print("Transcription Result:", result)
-    #text = "I am depressed and sad."
     sentiment = predict_sentiment(result)
     print("Sentiment Result:", sentiment)

@@ -1,85 +1,52 @@
-from datasets import load_dataset, concatenate_datasets
-from datasets.features import Features, Value
+import pandas as pd
 from transformers import AutoTokenizer
+from sklearn.model_selection import train_test_split
 import torch
+from torch.utils.data import Dataset, DataLoader
 
-def get_dataloaders(batch_size=32, max_len=128, model_vocab="bert-base-uncased"):
-    # 1. Load datasets
-    sst2 = load_dataset("glue", "sst2")
-    imdb = load_dataset("imdb")
+# Label encoding
+label2id = {"HAPPY": 0, "SAD": 1, "ANGRY": 2, "CONFUSED": 3, "GUILT": 4}
 
-    # 2. Rename IMDB text field to 'sentence'
-    imdb["train"] = imdb["train"].rename_column("text", "sentence")
-    imdb["test"] = imdb["test"].rename_column("text", "sentence")
+class EmotionDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
 
-    # 3. Normalize SST-2: convert label to int + remove 'idx'
-    def map_sst2(example):
-        example["label"] = int(example["label"])
-        return example
+    def __len__(self):
+        return len(self.texts)
 
-    sst2["train"] = sst2["train"].map(map_sst2)
-    sst2["validation"] = sst2["validation"].map(map_sst2)
-
-    sst2["train"] = sst2["train"].remove_columns(["idx"])
-    sst2["validation"] = sst2["validation"].remove_columns(["idx"])
-
-    # 👇 Cast SST-2 to Value("int64")
-    sst2["train"] = sst2["train"].cast(Features({
-        "sentence": Value("string"),
-        "label": Value("int64")
-    }))
-    sst2["validation"] = sst2["validation"].cast(Features({
-        "sentence": Value("string"),
-        "label": Value("int64")
-    }))
-
-    # 4. Normalize IMDB
-    def map_imdb(example):
-        example["label"] = int(example["label"])
-        return example
-
-    imdb["train"] = imdb["train"].map(map_imdb)
-    imdb["test"] = imdb["test"].map(map_imdb)
-
-    # Optional: reduce size
-    imdb["train"] = imdb["train"].shuffle(seed=42).select(range(25000))
-    imdb["test"] = imdb["test"].shuffle(seed=42).select(range(5000))
-
-    # 👇 Cast IMDB to match SST-2
-    imdb["train"] = imdb["train"].cast(Features({
-        "sentence": Value("string"),
-        "label": Value("int64")
-    }))
-    imdb["test"] = imdb["test"].cast(Features({
-        "sentence": Value("string"),
-        "label": Value("int64")
-    }))
-
-    # 5. Concatenate
-    train_dataset = concatenate_datasets([sst2["train"], imdb["train"]])
-    val_dataset   = concatenate_datasets([sst2["validation"], imdb["test"]])
-
-    # 6. Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_vocab)
-
-    def tokenize(example):
-        tokens = tokenizer(
-            example["sentence"],
+    def __getitem__(self, idx):
+        encoded = self.tokenizer(
+            self.texts[idx],
             padding="max_length",
             truncation=True,
-            max_length=max_len
+            max_length=self.max_len,
+            return_tensors="pt"
         )
-        tokens["label"] = example["label"]
-        return tokens
+        return {
+            "input_ids": encoded["input_ids"].squeeze(0),
+            "label": torch.tensor(self.labels[idx], dtype=torch.long)
+        }
 
-    train_dataset = train_dataset.map(tokenize, batched=True)
-    val_dataset   = val_dataset.map(tokenize, batched=True)
+def get_dataloaders(batch_size=32, max_len=128, model_vocab="bert-base-uncased"):
+    # 1. Load processed_emotions.csv
+    df = pd.read_csv("processed_emotions.csv")
+    df["label_id"] = df["label"].map(label2id)
 
-    train_dataset.set_format(type="torch", columns=["input_ids", "label"])
-    val_dataset.set_format(type="torch", columns=["input_ids", "label"])
+    # 2. Train/Val split
+    train_df, val_df = train_test_split(df, test_size=0.2, stratify=df["label_id"], random_state=42)
 
-    # 7. Return DataLoaders
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader   = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size)
+    # 3. Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_vocab)
+
+    # 4. Wrap into Dataset
+    train_dataset = EmotionDataset(train_df["text"].tolist(), train_df["label_id"].tolist(), tokenizer, max_len)
+    val_dataset = EmotionDataset(val_df["text"].tolist(), val_df["label_id"].tolist(), tokenizer, max_len)
+
+    # 5. Dataloaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
     return train_loader, val_loader
